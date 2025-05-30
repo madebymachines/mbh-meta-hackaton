@@ -631,15 +631,13 @@ def main():
     st.title(TITLE)
     
     st.markdown("""
-    🎯 **The Ultimate Data Science Copilot with 3 AI Agents!** 
+    🎯 **The Ultimate Data Science Copilot!** 
     
-    Ask any question and I'll automatically choose the best AI agent:
+    Ask any question, we have:
     
     - 🔍 **EDA Agent** for comprehensive data exploration and reports
     - 🐼 **Pandas Agent** for file-based analysis and visualizations  
     - 🗃️ **SQL Agent** for database queries and complex operations
-    
-    Just type your question naturally - the AI will route it to the right specialist!
     """)
     
     # Setup API and connections
