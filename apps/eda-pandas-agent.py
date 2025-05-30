@@ -7,6 +7,8 @@ import html
 import plotly.io as pio
 import json
 import re
+import sqlalchemy as sql
+import asyncio
 
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_openai import ChatOpenAI
@@ -19,17 +21,25 @@ from ai_data_science_team import (
     DataWranglingAgent,
     DataVisualizationAgent,
 )
+from ai_data_science_team.agents import SQLDatabaseAgent
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
 MODEL_LIST = ["gpt-4o-mini", "gpt-4o"]
-TITLE = "🤖 Smart Data Science AI Copilot"
+TITLE = "🚀 Ultimate Data Science AI Copilot"
+
+DB_OPTIONS = {
+    "None - Upload Files Only": None,
+    "Northwind Database": "sqlite:///data/northwind.db",
+    "Custom SQLite DB": "custom_sqlite",
+    "Custom Connection String": "custom_connection"
+}
 
 st.set_page_config(
     page_title=TITLE,
-    page_icon="🤖",
+    page_icon="🚀",
     layout="wide"
 )
 
@@ -142,9 +152,80 @@ def setup_openai_api():
         st.sidebar.info("Please enter your OpenAI API Key to proceed.")
         return None, None
 
+def setup_database_connection():
+    st.sidebar.header("🗃️ Database Configuration", divider=True)
+    
+    db_option = st.sidebar.selectbox(
+        "Select Database Source",
+        list(DB_OPTIONS.keys()),
+        key="db_selection"
+    )
+    
+    db_path = DB_OPTIONS.get(db_option)
+    sql_connection = None
+    
+    if db_option == "None - Upload Files Only":
+        st.sidebar.info("📁 File upload mode - no database connection")
+        return None, None
+    
+    elif db_option == "Custom SQLite DB":
+        uploaded_db = st.sidebar.file_uploader(
+            "Upload SQLite Database (.db file)",
+            type=["db", "sqlite", "sqlite3"],
+            key="sqlite_upload"
+        )
+        if uploaded_db:
+            temp_path = f"temp_{uploaded_db.name}"
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_db.read())
+            try:
+                sql_engine = sql.create_engine(f"sqlite:///{temp_path}")
+                sql_connection = sql_engine.connect()
+                st.sidebar.success(f"✅ Connected to {uploaded_db.name}")
+                return sql_connection, temp_path
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to connect: {e}")
+                return None, None
+        else:
+            st.sidebar.info("Please upload a SQLite database file")
+            return None, None
+    
+    elif db_option == "Custom Connection String":
+        connection_string = st.sidebar.text_input(
+            "Enter Database Connection String",
+            placeholder="sqlite:///path/to/db.db or postgresql://user:pass@host:port/db",
+            key="custom_connection"
+        )
+        if connection_string:
+            try:
+                sql_engine = sql.create_engine(connection_string)
+                sql_connection = sql_engine.connect()
+                st.sidebar.success("✅ Connected to custom database")
+                return sql_connection, connection_string
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to connect: {e}")
+                return None, None
+        else:
+            st.sidebar.info("Please enter a connection string")
+            return None, None
+    
+    else:
+        if db_path:
+            try:
+                sql_engine = sql.create_engine(db_path)
+                sql_connection = sql_engine.connect()
+                st.sidebar.success(f"✅ Connected to {db_option}")
+                return sql_connection, db_path
+            except Exception as e:
+                st.sidebar.error(f"❌ Failed to connect to {db_option}: {e}")
+                return None, None
+    
+    return None, None
+
 def setup_data_upload():
     """Handle data upload and return DataFrame"""
-    st.sidebar.header("📊 Data Upload/Selection", divider=True)
+    st.sidebar.header("📊 File Upload (Optional)", divider=True)
+    st.sidebar.markdown("*Upload files for EDA and Pandas analysis*")
     
     # Demo data option
     use_demo_data = st.sidebar.checkbox("Use demo data", value=False, key="use_demo")
@@ -156,7 +237,7 @@ def setup_data_upload():
             st.sidebar.success("✅ Demo data loaded successfully!")
             return df, "churn_data"
         else:
-            st.sidebar.warning("⚠️ Demo data file not found. Please upload your own data.")
+            st.sidebar.warning("⚠️ Demo data file not found.")
             return None, None
     
     # File upload
@@ -183,18 +264,16 @@ def setup_data_upload():
     return None, None
 
 # =============================================================================
-# SMART ROUTING SYSTEM
+# ROUTING SYSTEM (3-AGENT)
 # =============================================================================
 
-def detect_query_intent_llm(question: str, llm) -> str:
+def detect_query_intent_llm(question: str, llm, has_database: bool = False) -> str:
     """
     Use LLM to intelligently determine which agent to use based on user intent
-    Returns: 'eda' or 'pandas'
+    Returns: 'eda', 'pandas', or 'sql'
     """
     
-    routing_prompt = f"""
-You are a smart routing system for a data science application. Based on the user's question, you need to determine which AI agent should handle the query.
-
+    agents_description = """
 **Available Agents:**
 
 1. **EDA Agent** 🔍 - For comprehensive data exploration and analysis:
@@ -206,24 +285,38 @@ You are a smart routing system for a data science application. Based on the user
    - Data validation and integrity checks
 
 2. **Pandas Agent** 🐼 - For specific data queries and visualizations:
-   - Filtering, sorting, and data manipulation
+   - Filtering, sorting, and data manipulation on uploaded files
    - Creating specific charts and visualizations
-   - Answering business questions with data
+   - Answering business questions with uploaded data
    - Top/bottom N queries and rankings
    - Aggregations (sum, count, average, etc.)
    - Comparisons and trend analysis
+"""
+
+    if has_database:
+        response_format = "Return ONLY one word: either \"eda\", \"pandas\", or \"sql\""
+    else:
+        response_format = "Return ONLY one word: either \"eda\" or \"pandas\""
+    
+    routing_prompt = f"""
+You are a smart routing system for a data science application. Based on the user's question, you need to determine which AI agent should handle the query.
+
+{agents_description}
 
 **User Question:** "{question}"
 
+**Database Available:** {"Yes" if has_database else "No"}
+
 **Instructions:**
-- Analyze the user's intent and context
-- Consider what type of output would be most helpful
-- If the question is about understanding the data structure or quality → choose EDA
-- If the question is about getting specific insights or visualizations → choose Pandas
-- For ambiguous cases, consider which agent would provide more value
+- Analyze the user's intent and context carefully
+- If the question is about understanding data structure/quality → choose EDA
+- If the question is about getting specific insights from uploaded files → choose Pandas
+{"- If the question mentions SQL, tables, database queries, or complex joins → choose SQL" if has_database else ""}
+{"- If the question could benefit from database operations → choose SQL" if has_database else ""}
+- For ambiguous cases, consider which agent would provide the most value
 
 **Response Format:**
-Return ONLY one word: either "eda" or "pandas"
+{response_format}
 """
     
     try:
@@ -231,21 +324,38 @@ Return ONLY one word: either "eda" or "pandas"
         decision = response.content.strip().lower()
         
         # Validate response
-        if decision in ['eda', 'pandas']:
+        valid_options = ['eda', 'pandas', 'sql'] if has_database else ['eda', 'pandas']
+        if decision in valid_options:
             return decision
         else:
             # Fallback to keyword-based if LLM gives unexpected response
-            return detect_query_intent_fallback(question)
+            return detect_query_intent_fallback(question, has_database)
     except Exception as e:
         # Fallback to keyword-based routing if LLM fails
         print(f"LLM routing failed: {e}")
-        return detect_query_intent_fallback(question)
+        return detect_query_intent_fallback(question, has_database)
 
-def detect_query_intent_fallback(question: str) -> str:
+def detect_query_intent_fallback(question: str, has_database: bool = False) -> str:
     """
     Fallback keyword-based routing for when LLM routing fails
     """
     question_lower = question.lower()
+    
+    if has_database:
+        sql_indicators = [
+            'sql', 'query', 'select', 'from', 'where', 'join', 'group by',
+            'table', 'database', 'db', 'schema', 'tables', 'columns',
+            'insert', 'update', 'delete', 'create', 'alter', 'drop',
+            'aggregat', 'sum', 'count', 'avg', 'max', 'min',
+            'inner join', 'left join', 'right join', 'full join'
+        ]
+        
+        sql_score = sum(1 for indicator in sql_indicators if indicator in question_lower)
+
+        if any(strong_sql in question_lower for strong_sql in ['sql', 'query', 'database', 'table', 'join']):
+            return 'sql'
+    else:
+        sql_score = 0
     
     # EDA indicators
     eda_indicators = [
@@ -253,30 +363,36 @@ def detect_query_intent_fallback(question: str) -> str:
         'missing', 'null', 'quality', 'profile', 'profiling',
         'correlation', 'relationship', 'distribution',
         'sweetviz', 'dtale', 'report', 'comprehensive',
-        'statistics', 'statistical', 'outlier', 'anomaly'
+        'statistics', 'statistical', 'outlier', 'anomaly',
+        'explore', 'exploration', 'exploratory'
     ]
     
     # Pandas indicators
     pandas_indicators = [
         'show', 'display', 'plot', 'chart', 'graph', 'visualize',
         'top', 'bottom', 'highest', 'lowest', 'best', 'worst',
-        'filter', 'where', 'sort', 'group', 'count', 'sum',
-        'average', 'compare', 'trend', 'by month', 'by year'
+        'filter', 'sort', 'group', 'by month', 'by year',
+        'average', 'compare', 'trend', 'bar chart', 'pie chart'
     ]
     
     eda_score = sum(1 for indicator in eda_indicators if indicator in question_lower)
     pandas_score = sum(1 for indicator in pandas_indicators if indicator in question_lower)
     
-    return 'eda' if eda_score > pandas_score else 'pandas'
+    if has_database and sql_score > max(eda_score, pandas_score):
+        return 'sql'
+    elif eda_score > pandas_score:
+        return 'eda'
+    else:
+        return 'pandas'
 
-def detect_query_intent(question: str, llm=None, use_llm=True) -> str:
+def detect_query_intent(question: str, llm=None, use_llm=True, has_database=False) -> str:
     """
     Main routing function - uses LLM by default, falls back to keywords
     """
     if use_llm and llm:
-        return detect_query_intent_llm(question, llm)
+        return detect_query_intent_llm(question, llm, has_database)
     else:
-        return detect_query_intent_fallback(question)
+        return detect_query_intent_fallback(question, has_database)
 
 # =============================================================================
 # EDA FUNCTIONS
@@ -399,7 +515,43 @@ def process_pandas_query(question: str, llm, data: pd.DataFrame, pandas_analyst)
             "agent_type": "pandas",
             "success": False,
             "error": str(e),
-            "ai_message": "An error occurred while processing your query. Please try again."
+            "ai_message": "An error occurred while processing your pandas query. Please try again."
+        }
+
+# =============================================================================
+# SQL FUNCTIONS
+# =============================================================================
+
+async def process_sql_query(question: str, llm, sql_connection) -> dict:
+    """Process SQL queries using SQLDatabaseAgent"""
+    try:
+        sql_db_agent = SQLDatabaseAgent(
+            model=llm,
+            connection=sql_connection,
+            n_samples=1,
+            log=False,
+            bypass_recommended_steps=True,
+        )
+        
+        await sql_db_agent.ainvoke_agent(user_instructions=question)
+        
+        sql_query = sql_db_agent.get_sql_query_code()
+        response_df = sql_db_agent.get_data_sql()
+        
+        return {
+            "agent_type": "sql",
+            "success": True,
+            "sql_query": sql_query,
+            "dataframe": response_df,
+            "ai_message": f"Successfully executed SQL query."
+        }
+        
+    except Exception as e:
+        return {
+            "agent_type": "sql",
+            "success": False,
+            "error": str(e),
+            "ai_message": f"An error occurred while processing your SQL query: {str(e)}"
         }
 
 # =============================================================================
@@ -407,7 +559,7 @@ def process_pandas_query(question: str, llm, data: pd.DataFrame, pandas_analyst)
 # =============================================================================
 
 def display_chat_history():
-    """Display unified chat history with artifacts from both agents"""
+    """Display unified chat history with artifacts from all agents"""
     for i, msg in enumerate(st.session_state.unified_msgs.messages):
         with st.chat_message(msg.type):
             if msg.content.startswith("AGENT_RESPONSE:"):
@@ -428,6 +580,9 @@ def display_chat_history():
                         key=f"df_{df_index}_{i}",
                         use_container_width=True
                     )
+            elif "SQL_RESULT:" in msg.content:
+                content = msg.content.replace("SQL_RESULT:", "").strip()
+                st.markdown(content)
             else:
                 st.write(msg.content)
             
@@ -476,47 +631,73 @@ def main():
     st.title(TITLE)
     
     st.markdown("""
-    🎯 **One Chat Interface, Multiple AI Agents!** 
+    🎯 **The Ultimate Data Science Copilot with 3 AI Agents!** 
     
-    Ask any question about your data and I'll automatically choose the best AI agent to help you:
+    Ask any question and I'll automatically choose the best AI agent:
     
-    - 🔍 **EDA Agent** for comprehensive analysis, reports, and data exploration
-    - 🐼 **Pandas Agent** for data queries, visualizations, and business insights
+    - 🔍 **EDA Agent** for comprehensive data exploration and reports
+    - 🐼 **Pandas Agent** for file-based analysis and visualizations  
+    - 🗃️ **SQL Agent** for database queries and complex operations
     
-    Just type your question naturally - no need to specify which tool to use!
+    Just type your question naturally - the AI will route it to the right specialist!
     """)
     
-    # Setup API and data
+    # Setup API and connections
     llm, api_key = setup_openai_api()
     if not llm:
         st.stop()
     
+    sql_connection, db_path = setup_database_connection()
     data, file_name = setup_data_upload()
-    if data is None:
-        st.info("Please upload a CSV/Excel file or use demo data to proceed.")
+    
+    # Check what data sources are available
+    has_database = sql_connection is not None
+    has_files = data is not None
+    
+    if not has_database and not has_files:
+        st.warning("⚠️ Please either connect to a database or upload a file to proceed.")
         st.stop()
     
-    # Display data preview
-    with st.expander(f"📋 Data Preview: {file_name}", expanded=False):
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.dataframe(data.head(), use_container_width=True)
-        with col2:
-            st.metric("Rows", data.shape[0])
-            st.metric("Columns", data.shape[1])
-
+    # Display data sources status
+    col1, col2 = st.columns(2)
+    with col1:
+        if has_database:
+            st.success(f"🗃️ **Database Connected:** {db_path or 'Custom Connection'}")
+        else:
+            st.info("🗃️ **Database:** Not connected")
+    
+    with col2:
+        if has_files:
+            st.success(f"📁 **File Loaded:** {file_name}")
+        else:
+            st.info("📁 **Files:** None uploaded")
+    
+    # Display data preview for files
+    if data is not None:
+        with st.expander(f"📋 File Preview: {file_name}", expanded=False):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.dataframe(data.head(), use_container_width=True)
+            with col2:
+                st.metric("Rows", data.shape[0])
+                st.metric("Columns", data.shape[1])
+    
+    # Initialize session state
     if "unified_msgs" not in st.session_state:
         st.session_state.unified_msgs = StreamlitChatMessageHistory(key="unified_messages")
         if len(st.session_state.unified_msgs.messages) == 0:
-            st.session_state.unified_msgs.add_ai_message(
-                "Hi! 👋 I'm your Smart Data Science Copilot. Ask me anything about your data - "
-                "I'll automatically choose the best AI agent to help you! \n\n"
-                "**Try asking:**\n"
-                "- 'Describe this dataset' (EDA Agent)\n"
-                "- 'Show top 5 records by sales in a bar chart' (Pandas Agent)\n"
-                "- 'Analyze missing data' (EDA Agent)\n"
-                "- 'What's the correlation between price and sales?' (Pandas Agent)"
-            )
+            welcome_msg = "Hi! 👋 I'm your Ultimate Data Science Copilot with 3 specialized AI agents:\n\n"
+            if has_database:
+                welcome_msg += "🗃️ **SQL Agent** - Ask about database tables, run queries\n"
+            if has_files:
+                welcome_msg += "🔍 **EDA Agent** - Explore and analyze your uploaded data\n🐼 **Pandas Agent** - Create charts and get insights from files\n"
+            welcome_msg += "\n**Try asking:**\n"
+            if has_database:
+                welcome_msg += "- 'What tables exist in the database?' (SQL)\n"
+            if has_files:
+                welcome_msg += "- 'Describe this dataset' (EDA)\n- 'Show top 5 records in a bar chart' (Pandas)\n"
+            
+            st.session_state.unified_msgs.add_ai_message(welcome_msg)
     
     if "chat_artifacts" not in st.session_state:
         st.session_state["chat_artifacts"] = {}
@@ -527,7 +708,8 @@ def main():
     if "dataframes" not in st.session_state:
         st.session_state.dataframes = []
     
-    if "pandas_analyst" not in st.session_state:
+    # Setup Pandas Data Analyst (initialize once)
+    if "pandas_analyst" not in st.session_state and has_files:
         st.session_state.pandas_analyst = PandasDataAnalyst(
             model=llm,
             data_wrangling_agent=DataWranglingAgent(
@@ -542,27 +724,86 @@ def main():
                 log=False,
             ),
         )
-
+    
+    # Display chat history
     display_chat_history()
     
+    # Chat input
     if question := st.chat_input("Ask me anything about your data...", key="unified_input"):
         with st.spinner("🤖 Analyzing your question and choosing the best AI agent..."):
-
-            st.session_state.unified_msgs.add_user_message(question)
-
-            intent = detect_query_intent(question, llm, use_llm=True)
             
-            if intent == 'eda':
+            # Add user message
+            st.session_state.unified_msgs.add_user_message(question)
+            
+            # Detect intent and route to appropriate agent
+            intent = detect_query_intent(question, llm, use_llm_routing, has_database)
+            
+            # Validate intent based on available resources
+            if intent == 'sql' and not has_database:
+                intent = 'pandas' if has_files else 'eda'
+            elif intent in ['eda', 'pandas'] and not has_files:
+                if has_database:
+                    intent = 'sql'
+                else:
+                    st.error("No data source available for this query.")
+                    return
+            
+            # Route to appropriate agent
+            if intent == 'sql':
+                st.info("🗃️ **SQL Agent** selected for database operations")
+                
+                async def handle_sql():
+                    return await process_sql_query(question, llm, sql_connection)
+                
+                try:
+                    result = asyncio.run(handle_sql())
+                    
+                    if result.get("success", False):
+                        sql_query = result.get("sql_query", "")
+                        response_df = result.get("dataframe")
+                        
+                        if sql_query:
+                            # Format response with SQL query
+                            response_text = f"### 🗃️ SQL Query Results\n\n**SQL Query:**\n```sql\n{sql_query}\n```\n\n**Result:**"
+                            
+                            # Store dataframe
+                            df_index = len(st.session_state.dataframes)
+                            st.session_state.dataframes.append(response_df)
+                            
+                            # Add messages
+                            st.session_state.unified_msgs.add_ai_message(response_text)
+                            st.session_state.unified_msgs.add_ai_message(f"DATAFRAME_INDEX:{df_index}")
+                            
+                            # Display results
+                            st.chat_message("ai").write(response_text)
+                            st.dataframe(response_df, use_container_width=True)
+                        else:
+                            error_msg = "❌ No SQL query was generated."
+                            st.session_state.unified_msgs.add_ai_message(error_msg)
+                            st.chat_message("ai").write(error_msg)
+                    else:
+                        error_msg = result.get("ai_message", "An error occurred with the SQL query.")
+                        st.session_state.unified_msgs.add_ai_message(error_msg)
+                        st.chat_message("ai").write(error_msg)
+                        
+                except Exception as e:
+                    error_msg = f"❌ SQL Agent error: {str(e)}"
+                    st.session_state.unified_msgs.add_ai_message(error_msg)
+                    st.chat_message("ai").write(error_msg)
+            
+            elif intent == 'eda':
                 st.info("🔍 **EDA Agent** selected for comprehensive data analysis")
                 result = process_exploratory(question, llm, data)
                 
+                # Process EDA response
                 ai_msg = result.get("ai_message", "")
                 tool_name = result.get("last_tool_call", "")
                 if tool_name:
                     ai_msg += f"\n\n*🔧 Tool Used: {tool_name}*"
                 
                 st.session_state.unified_msgs.add_ai_message(ai_msg)
-
+                
+                # Process EDA artifacts
                 artifact_list = []
                 if "last_tool_call" in result:
                     tool_name = result["last_tool_call"]
@@ -620,6 +861,7 @@ def main():
                             "data": {"dtale_url": result.get("dtale_url")},
                         })
                     else:
+                        # Handle other EDA artifacts
                         if "plotly_fig" in result:
                             artifact_list.append({
                                 "title": "📊 Interactive Visualization",
@@ -643,7 +885,7 @@ def main():
                     msg_index = len(st.session_state.unified_msgs.messages) - 1
                     st.session_state["chat_artifacts"][msg_index] = artifact_list
             
-            else:
+            else:  # pandas agent
                 st.info("🐼 **Pandas Agent** selected for data analysis and visualization")
                 result = process_pandas_query(question, llm, data, st.session_state.pandas_analyst)
                 
@@ -651,6 +893,7 @@ def main():
                     routing = result.get("routing_preprocessor_decision")
                     
                     if routing == "chart" and not result.get("plotly_error", False):
+                        # Process chart result
                         plot_data = result.get("plotly_graph")
                         if plot_data:
                             if isinstance(plot_data, dict):
@@ -674,6 +917,7 @@ def main():
                             st.chat_message("ai").write(error_msg)
                     
                     elif routing == "table":
+                        # Process table result
                         data_wrangled = result.get("data_wrangled")
                         if data_wrangled is not None:
                             response_text = "📋 Here's your data result:"
@@ -693,6 +937,7 @@ def main():
                             st.session_state.unified_msgs.add_ai_message(error_msg)
                             st.chat_message("ai").write(error_msg)
                     else:
+                        # Fallback case
                         data_wrangled = result.get("data_wrangled")
                         if data_wrangled is not None:
                             response_text = "⚠️ There was an issue generating the chart. Here's the data instead:"
@@ -712,12 +957,14 @@ def main():
                             st.session_state.unified_msgs.add_ai_message(error_msg)
                             st.chat_message("ai").write(error_msg)
                 else:
+                    # Handle error case
                     error_msg = result.get("ai_message", "An error occurred while processing your query.")
                     st.session_state.unified_msgs.add_ai_message(error_msg)
                     st.chat_message("ai").write(error_msg)
             
             st.rerun()
 
+    # Add helpful sidebar info
     with st.sidebar:
         st.markdown("---")
         st.markdown("### ⚙️ Routing Settings")
@@ -732,38 +979,43 @@ def main():
             st.info("Using keyword-based routing (faster but less accurate)")
         
         st.markdown("---")
-        st.markdown("### 🤖 Smart Agent Selection")
-        st.markdown("""
-        **EDA Agent** 🔍 handles:
-        - Dataset descriptions & summaries
-        - Missing data analysis  
-        - Correlation analysis
-        - Statistical reports
-        - Data profiling
+        st.markdown("### 🤖 Available AI Agents")
         
-        **Pandas Agent** 🐼 handles:
-        - Data queries & filtering
-        - Charts & visualizations
-        - Business metrics
-        - Comparisons & rankings
-        """)
+        if has_database:
+            st.markdown("🗃️ **SQL Agent** - Database queries")
+        else:
+            st.markdown("🗃️ **SQL Agent** - ❌ No database connected")
+            
+        if has_files:
+            st.markdown("🔍 **EDA Agent** - Data exploration")
+            st.markdown("🐼 **Pandas Agent** - Analysis & charts")
+        else:
+            st.markdown("🔍 **EDA Agent** - ❌ No files uploaded")
+            st.markdown("🐼 **Pandas Agent** - ❌ No files uploaded")
         
         st.markdown("---")
         st.markdown("### 💡 Example Questions")
         
-        example_questions = [
-            "Describe this dataset",
-            "Show top 5 sales by region", 
-            "Analyze missing data",
-            "Create a bar chart of revenue by month",
-            "Generate a correlation report",
-            "What's the average price by category?"
-        ]
+        example_questions = []
+        
+        if has_database:
+            example_questions.extend([
+                "What tables exist in the database?",
+                "Show me first 10 rows from [table_name]",
+                "Aggregate sales by region using SQL"
+            ])
+        
+        if has_files:
+            example_questions.extend([
+                "Describe this dataset",
+                "Show top 5 records in a bar chart", 
+                "Analyze missing data",
+                "Create correlation report"
+            ])
         
         for i, eq in enumerate(example_questions):
             if st.button(eq, key=f"example_{i}", use_container_width=True):
-                st.session_state[f"example_triggered_{i}"] = True
-                st.rerun()
+                st.info(f"Example: {eq}")
 
 if __name__ == "__main__":
     main()
