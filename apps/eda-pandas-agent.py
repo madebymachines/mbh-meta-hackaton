@@ -27,7 +27,16 @@ from ai_data_science_team.agents import SQLDatabaseAgent
 # CONFIGURATION
 # =============================================================================
 
-MODEL_LIST = ["gpt-4o-mini", "gpt-4o"]
+MODEL_LIST = [
+    "llama3.1-8b", 
+    "llama3.1-70b", 
+    "llama3.1-405b",
+    "llama3.2-1b",
+    "llama3.2-3b", 
+    "llama3.2-11b",
+    "llama3.2-90b"
+]
+
 TITLE = "🚀 Ultimate Data Science AI Copilot"
 
 DB_OPTIONS = {
@@ -119,37 +128,57 @@ def render_report_iframe(report_src, src_type="url", height=620, title="Interact
     """
     components.html(html_code, height=height, scrolling=True)
 
-def setup_openai_api():
-    """Setup OpenAI API and return LLM instance"""
-    st.sidebar.header("🔑 OpenAI Configuration")
+def setup_llama_api():
+    """Setup Llama API and return LLM instance"""
+    st.sidebar.header("🔑 Llama API Configuration")
     
     api_key = st.sidebar.text_input(
-        "Enter your OpenAI API Key",
+        "Enter your Llama API Key",
         type="password",
-        help="Your OpenAI API key is required for the app to function.",
-        key="openai_api_key"
+        help="Your Llama API key is required for the app to function.",
+        key="llama_api_key"
     )
     
     if api_key:
-        client = OpenAI(api_key=api_key)
+        # Use Llama API endpoint
+        client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.llama-api.com/v1"  # Llama API endpoint
+        )
         try:
+            # Test the connection with Llama models
             models = client.models.list()
             st.sidebar.success("✅ API Key is valid!")
             
+            # Updated model list for Llama models
+            llama_models = [
+                "llama3.1-8b", 
+                "llama3.1-70b", 
+                "llama3.1-405b",
+                "llama3.2-1b",
+                "llama3.2-3b",
+                "llama3.2-11b",
+                "llama3.2-90b"
+            ]
+            
             model_option = st.sidebar.selectbox(
-                "Choose OpenAI model", 
-                MODEL_LIST, 
-                index=0,
+                "Choose Llama model", 
+                llama_models, 
+                index=1,  # Default to 70b model
                 key="model_selection"
             )
             
-            llm = ChatOpenAI(model=model_option, api_key=api_key)
+            llm = ChatOpenAI(
+                model=model_option, 
+                api_key=api_key,
+                base_url="https://api.llama-api.com/v1"
+            )
             return llm, api_key
         except Exception as e:
             st.sidebar.error(f"❌ Invalid API Key: {e}")
             return None, None
     else:
-        st.sidebar.info("Please enter your OpenAI API Key to proceed.")
+        st.sidebar.info("Please enter your Llama API Key to proceed.")
         return None, None
 
 def setup_database_connection():
@@ -641,7 +670,7 @@ def main():
     """)
     
     # Setup API and connections
-    llm, api_key = setup_openai_api()
+    llm, api_key = setup_llama_api()
     if not llm:
         st.stop()
     
