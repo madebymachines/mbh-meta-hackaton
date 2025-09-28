@@ -6,7 +6,6 @@ from pathlib import Path
 import html
 import plotly.io as pio
 import json
-import re
 import sqlalchemy as sql
 import asyncio
 
@@ -28,13 +27,10 @@ from ai_data_science_team.agents import SQLDatabaseAgent
 # =============================================================================
 
 MODEL_LIST = [
-    "llama3.1-8b", 
-    "llama3.1-70b", 
-    "llama3.1-405b",
-    "llama3.2-1b",
-    "llama3.2-3b", 
-    "llama3.2-11b",
-    "llama3.2-90b"
+    "Llama-4-Maverick-17B-128E-Instruct-FP8", 
+    "Llama-4-Scout-17B-16E-Instruct-FP8", 
+    "Llama-3.3-70B-Instruct",
+    "Llama-3.3-8B-Instruct",
 ]
 
 TITLE = "🚀 Ultimate Data Science AI Copilot"
@@ -147,23 +143,12 @@ def setup_llama_api():
         )
         try:
             # Test the connection with Llama models
-            models = client.models.list()
+            client.models.list()
             st.sidebar.success("✅ API Key is valid!")
-            
-            # Updated model list for Llama models
-            llama_models = [
-                "llama3.1-8b", 
-                "llama3.1-70b", 
-                "llama3.1-405b",
-                "llama3.2-1b",
-                "llama3.2-3b",
-                "llama3.2-11b",
-                "llama3.2-90b"
-            ]
             
             model_option = st.sidebar.selectbox(
                 "Choose Llama model", 
-                llama_models, 
+                MODEL_LIST, 
                 index=1,  # Default to 70b model
                 key="model_selection"
             )
